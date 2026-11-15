@@ -1,0 +1,7 @@
+# Dashboard defaults: serve on this computer only and send no usage statistics.
+[server]
+address = "localhost"
+headless = false
+
+[browser]
+gatherUsageStats = false
