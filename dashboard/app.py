@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 
 import streamlit as st
+import streamlit.components.v1 as components
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,10 +20,11 @@ for extra in (ROOT / "src", ROOT / "dashboard"):
 
 import launcher  # noqa: E402
 import monitor  # noqa: E402
+import agent_stage  # noqa: E402
 from studio.config import ConfigError, load_settings  # noqa: E402
 from studio.services.openrouter import OpenRouterError  # noqa: E402
 
-VIEWS = ["Monitor", "Media", "New production", "Batch & queue", "Recovery"]
+VIEWS = ["Monitor", "Presentation demo", "Media", "New production", "Batch & queue", "Recovery"]
 STATUS_BOX = {
     "completed": (st.success, "Completed: every approval passed and the final files were exported."),
     "running": (st.info, "Running: the pipeline is executing right now."),
@@ -87,6 +89,19 @@ def load(settings, project_id: str) -> dict | None:
         return st.session_state.get(f"snapshot:{project_id}")
     st.session_state[f"snapshot:{project_id}"] = snapshot
     return snapshot
+
+# Display the animated crew using recorded activity or the free demo.
+def stage_section(snapshot=None, *, demo=False) -> None:
+    components.html(
+        agent_stage.render_stage(snapshot, demo=demo),
+        height=760,
+        scrolling=True,
+    )
+    if not demo:
+        st.caption(
+            "Characters follow recorded task states. "
+            "Enable auto-refresh to see updates."
+        )
 
 
 # ---- Monitor ---------------------------------------------------------------------------
@@ -213,6 +228,7 @@ def monitor_view(settings, project_id: str, newest_first: bool) -> None:
         st.session_state["page_marker"] = marker
         st.rerun()
     st.session_state["page_marker"] = marker
+    stage_section(snapshot)
     overview_section(snapshot)
     agents_section(snapshot, settings)
     events_section(snapshot, newest_first)
@@ -492,6 +508,15 @@ def main() -> None:
     auto = st.sidebar.toggle("Auto-refresh", value=True)
     newest_first = st.sidebar.toggle("Newest events first", value=True)
     st.sidebar.caption(f"Database: {settings.db_path}")
+
+    # Run the presentation animation without making API requests.
+    if view == "Presentation demo":
+        st.info(
+            "Simulated presentation demo. "
+            "No API calls, credits, or production records are used."
+        )
+        stage_section(demo=True)
+        return
 
     if view == "New production":
         new_production_view(settings)
