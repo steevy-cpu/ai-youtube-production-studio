@@ -22,6 +22,12 @@ GROUND_RULES = (
 )
 
 
+def said(result: BaseModel) -> str:
+    """Digest of an agent's answer, stored with the model call so the live log can show it."""
+    from studio.watch import digest          # local import: watch has no dependency on the agents
+    return digest(result)
+
+
 class AgentOutputError(Exception):
     """The model kept returning output that does not satisfy the required schema."""
 
@@ -96,7 +102,7 @@ class Agent:
                           "Reply again with corrected, complete JSON only.")
                 continue
             ctx.store.add_agent_run(ctx.project_id, ctx.task, self.name, action, usage.model or model, "ok",
-                                    f"validated {schema.__name__}", time.monotonic() - started)
+                                    said(result), time.monotonic() - started)
             return result
         raise AgentOutputError(f"{self.name}/{action}: model output failed validation after "
                                f"{ctx.settings.max_llm_repair_attempts + 1} attempts: {problem}")
@@ -107,7 +113,7 @@ class Agent:
                                      detail, 0.0)
 
     def evaluation(self, verdict: Verdict, *, target_id: str, target_kind: str, threshold: float,
-                   evaluator: str | None = None) -> EvaluationResult:
+                   evaluator: str | None = None, metrics: dict | None = None) -> EvaluationResult:
         """Turn a judge verdict into a stored EvaluationResult. Passing needs approval AND the score."""
         passed = verdict.approved and verdict.score >= threshold
         issues = list(verdict.issues)
@@ -118,5 +124,6 @@ class Agent:
             project_id=self.ctx.project_id, parent_id=target_id, target_kind=target_kind,
             evaluator=evaluator or self.name, passed=passed, score=verdict.score, threshold=threshold,
             criteria=verdict.criteria, explanation=verdict.explanation, issues=issues,
-            suggested_changes=verdict.suggested_changes, status="passed" if passed else "failed")
+            suggested_changes=verdict.suggested_changes, metrics=metrics or {},
+            status="passed" if passed else "failed")
         return self.ctx.store.add_evaluation(result)

@@ -17,8 +17,13 @@ Full design documentation: [docs/SYSTEM_DOCUMENTATION.md](docs/SYSTEM_DOCUMENTAT
 - Deterministic software guards (script, timeline, prompt, media, audio, final video) separate
   from LLM judges.
 - Feedback loops with bounded retries: only the rejected artifact is redone; approved work is kept.
+- Final QA sends a video that is too long back to the Scene Director, who removes whole sentences
+  (no rewording); images are kept and only the changed scenes are re-recorded and re-rendered.
+- Background music: the Editor picks a public-domain (CC0) track from `assets/music/` that fits the
+  video's tone and mixes it quietly under the narration (`ENABLE_MUSIC`, `MUSIC_VOLUME`).
 - Complete thumbnail branch: SEO brief, prompt, prompt judge, generation, SEO review, visual
-  judge, Director approval, with its own retry counter. Thumbnail text is drawn locally.
+  judge, Director approval, with its own retry counter and its own, stronger model
+  (`THUMBNAIL_MODEL`). Thumbnail text is drawn locally.
 - One SQLite file as unified memory (tasks, agent runs, versions, assets, evaluations, costs,
   decisions). Media files live on disk and are referenced by path.
 - One OpenRouter client for every model call (chat, vision, images, video jobs, speech).
@@ -75,6 +80,7 @@ python run.py produce "Cybersecurity" --budget 25     # full 10-minute live prod
 python run.py new "Nursing" --mode preview            # create without running
 python run.py run <project-id>                        # run a created project
 python run.py status <project-id>                     # stage, task states, errors, cost
+python run.py watch [project-id]                      # live log: what each agent is doing and saying
 python run.py report <project-id>                     # cost, evaluation, decision summaries
 python run.py collect <project-id>                    # refresh output/<id>/ from local files (no API call)
 python run.py resume <project-id>                     # continue after a failure or budget stop

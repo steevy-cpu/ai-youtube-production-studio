@@ -353,6 +353,14 @@ class OpenRouterClient:
         elif "image" not in modalities(s.vision_model, "input"):
             problems.append(f"VISION_MODEL '{s.vision_model}' does not accept image input")
 
+        if s.thumbnail_model:
+            if s.thumbnail_model not in models:
+                problems.append(f"THUMBNAIL_MODEL '{s.thumbnail_model}' is not in the OpenRouter model catalog")
+            elif "text" not in modalities(s.thumbnail_model, "output"):
+                problems.append(f"THUMBNAIL_MODEL '{s.thumbnail_model}' does not produce text")
+            elif "image" not in modalities(s.thumbnail_model, "input"):
+                problems.append(f"THUMBNAIL_MODEL '{s.thumbnail_model}' does not accept image input")
+
         if s.enable_images:
             if s.image_model not in models:
                 problems.append(f"IMAGE_MODEL '{s.image_model}' is not in the OpenRouter model catalog")
@@ -380,6 +388,28 @@ class OpenRouterClient:
                     if not caps["image_references"]:
                         caps["notes"].append("Image model is not given character reference images; "
                                              "character consistency relies on prompt text only.")
+
+        extra_image_models = {"THUMBNAIL_IMAGE_MODEL": s.thumbnail_image_model,
+                              "IMAGE_RETRY_MODEL": s.image_retry_model}
+        for setting, name in extra_image_models.items() if s.enable_images else ():
+            if not name or name == s.image_model:
+                continue
+            entry = self.catalog("images").get(name)
+            if name not in models or "image" not in modalities(name, "output"):
+                problems.append(f"{setting} '{name}' is not an image model in the OpenRouter catalog")
+            elif entry is None:
+                problems.append(f"{setting} '{name}' is not served by POST /images")
+            else:
+                ratios = entry.get("supported_parameters") or {}
+                ratios = ratios.get("aspect_ratio", {}).get("values") if isinstance(ratios, dict) else None
+                if ratios and s.aspect_ratio not in ratios:
+                    problems.append(f"{setting} '{name}' does not support aspect ratio {s.aspect_ratio}")
+                accepts = "input_references" in params(entry) or \
+                    "image" in ((entry.get("architecture") or {}).get("input_modalities") or [])
+                accepts = accepts and s.image_use_references != "off"
+                caps.setdefault("references_by_model", {})[name] = accepts
+                if setting == "THUMBNAIL_IMAGE_MODEL":
+                    caps["thumbnail_image_references"] = accepts
 
         if s.enable_tts:
             if s.tts_model not in models:

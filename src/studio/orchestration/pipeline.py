@@ -104,6 +104,9 @@ def make_context(settings: Settings, store: MemoryStore, project_id: str, *, cli
     if project["brief"].get("enable_video"):        # the project opted in to AI video clips
         settings = settings.model_copy(update={"enable_video": True})
     effective = settings.for_mode(mode)
+    measured_wpm = store.recall(project_id, "measured_wpm")       # set once Final QA measured the narrator
+    if measured_wpm:
+        effective = effective.model_copy(update={"words_per_minute": int(measured_wpm)})
     dirs = ProjectDirs.create(settings, project_id)
     log = get_logger(dirs.sub("logs") / "run.log", settings.openrouter_api_key, verbose)
     if client is None:

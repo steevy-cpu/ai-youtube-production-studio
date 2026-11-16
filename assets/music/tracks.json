@@ -1,0 +1,97 @@
+{
+  "tracks": [
+    {
+      "file": "chill_lofi_inspired.mp3",
+      "title": "Chill lofi inspired",
+      "author": "isaiah658",
+      "license": "CC0 1.0 Universal (public domain dedication)",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "source": "https://opengameart.org/content/chill-lofi-inspired",
+      "retrieved": "2026-11-15",
+      "moods": [
+        "chill",
+        "calm",
+        "relaxed",
+        "lofi",
+        "thoughtful",
+        "educational",
+        "friendly"
+      ],
+      "duration_s": 123.2
+    },
+    {
+      "file": "apple_cider.mp3",
+      "title": "Apple Cider",
+      "author": "SeventhSeeker",
+      "license": "CC0 1.0 Universal (public domain dedication)",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "source": "https://opengameart.org/content/apple-cider",
+      "retrieved": "2026-11-15",
+      "moods": [
+        "cozy",
+        "warm",
+        "gentle",
+        "friendly",
+        "storytelling",
+        "wholesome"
+      ],
+      "duration_s": 199.8
+    },
+    {
+      "file": "a_day_in_night_out.mp3",
+      "title": "A Day In, Night Out",
+      "author": "Umplix",
+      "license": "CC0 1.0 Universal (public domain dedication)",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "source": "https://opengameart.org/content/a-day-in-night-out",
+      "retrieved": "2026-11-15",
+      "moods": [
+        "fun",
+        "playful",
+        "upbeat",
+        "lofi",
+        "humorous",
+        "witty",
+        "energetic"
+      ],
+      "duration_s": 76.8
+    },
+    {
+      "file": "next_to_you.mp3",
+      "title": "Next to You",
+      "author": "SdiviHall",
+      "license": "CC0 1.0 Universal (public domain dedication)",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "source": "https://opengameart.org/content/next-to-you",
+      "retrieved": "2026-11-15",
+      "moods": [
+        "emotional",
+        "inspiring",
+        "aspirational",
+        "heartfelt",
+        "serious",
+        "dramatic"
+      ],
+      "duration_s": 83.5
+    },
+    {
+      "file": "bossa_nova.mp3",
+      "title": "Bossa Nova",
+      "author": "looneybits",
+      "license": "CC0 1.0 Universal (public domain dedication)",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "source": "https://opengameart.org/content/bossa-nova",
+      "retrieved": "2026-11-15",
+      "moods": [
+        "light",
+        "quirky",
+        "comedic",
+        "funny",
+        "humorous",
+        "retro",
+        "playful"
+      ],
+      "duration_s": 59.6
+    }
+  ]
+}

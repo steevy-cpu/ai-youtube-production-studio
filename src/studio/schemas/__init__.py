@@ -332,6 +332,9 @@ class EditingTimeline(Record):
     audio: list[AudioClip] = Field(min_length=1)
     music_path: str = ""
     music_volume: float = 0.0
+    music_title: str = ""            # "Title by Author" of a library track
+    music_license: str = ""
+    music_source: str = ""
     transition_s: float = 0.3
     total_duration_s: float
     notes: list[str] = []

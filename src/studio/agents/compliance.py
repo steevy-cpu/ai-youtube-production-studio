@@ -78,7 +78,8 @@ class Compliance(Agent):
         if music:
             items.append(ComplianceItem(
                 check="music_license_verification", mandatory=False, status="needs_human_review",
-                detail="The recorded licence text was supplied by the user and has not been verified."))
+                detail="The licence is the one recorded in the music library manifest (tracks.json) or "
+                       "supplied by the user; the software has not verified it."))
         items.append(ComplianceItem(
             check="voice_cloning", mandatory=True, status="pass",
             detail=f"Narration uses the stock voice '{s.tts_voice}'; no reference audio is ever sent."))

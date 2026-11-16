@@ -5,6 +5,9 @@ Spoken audio is never trimmed: scenes get exactly their narration length plus a 
 """
 from __future__ import annotations
 
+import json
+import re
+import zlib
 from pathlib import Path
 
 from studio.agents.base import Agent
@@ -28,6 +31,31 @@ def caption_chunks(narration: str) -> list[str]:
             else:
                 chunks.append(" ".join(chunk))
     return chunks
+
+
+def pick_track(music_dir: Path | str, tone: str, seed: str) -> dict | None:
+    """Choose a background track from the library manifest (`tracks.json`), or None.
+
+    The track whose mood tags share the most words with the video's tone wins; ties (and a tone that
+    matches nothing) are settled by a hash of `seed`, so one project always gets the same track
+    while different projects are spread over the library. Entries without a licence are skipped.
+    """
+    folder = Path(music_dir)
+    try:
+        entries = json.loads((folder / "tracks.json").read_text(encoding="utf-8"))["tracks"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    usable = [t for t in entries if isinstance(t, dict) and str(t.get("license", "")).strip()
+              and (folder / str(t.get("file", ""))).is_file()]
+    if not usable:
+        return None
+    words = set(re.findall(r"[a-z]+", tone.lower()))
+    score = {t["file"]: len(words & {m.lower() for m in t.get("moods", [])}) for t in usable}
+    best = [t for t in usable if score[t["file"]] == max(score.values())]
+    best.sort(key=lambda t: t["file"])
+    track = dict(best[zlib.crc32(seed.encode()) % len(best)])
+    track["path"] = str(folder / track["file"])
+    return track
 
 
 class Editor(Agent):
@@ -84,13 +112,25 @@ class Editor(Agent):
             audio.append(AudioClip(scene_id=scene.id, path=sound.path, start_s=scene_start,
                                    slot_s=(frame_cursor - scene_start_frame) / fps, audio_s=sound.duration_s))
 
-        music = s.music_path if s.music_path and Path(s.music_path).is_file() else ""
-        if s.music_path and not music:
-            notes.append(f"MUSIC_PATH '{s.music_path}' was not found; the video has no music.")
+        music, credit = "", {}
+        if s.enable_music and s.music_path:                       # one file forced by the user
+            if Path(s.music_path).is_file():
+                music, credit = s.music_path, {"music_license": s.music_license}
+            else:
+                notes.append(f"MUSIC_PATH '{s.music_path}' was not found; the video has no music.")
+        elif s.enable_music:                                      # a track from the library
+            tone = str(self.ctx.store.recall(self.ctx.project_id, "tone", ""))
+            track = pick_track(s.music_dir, tone, self.ctx.project_id)
+            if track:
+                music = track["path"]
+                credit = {"music_title": f"{track.get('title', track['file'])} by {track.get('author', 'unknown')}",
+                          "music_license": track["license"], "music_source": track.get("source", "")}
+            else:
+                notes.append(f"No licensed track found in '{s.music_dir}'; the video has no music.")
         timeline = EditingTimeline(
             project_id=self.ctx.project_id, parent_id=storyboard.id, width=s.width, height=s.height, fps=fps,
             clips=clips, audio=audio, music_path=music, music_volume=s.music_volume if music else 0.0,
-            total_duration_s=frame_cursor / fps, notes=notes, status="ready")
+            total_duration_s=frame_cursor / fps, notes=notes, status="ready", **credit)
         self.note("build_timeline", f"{len(clips)} clips, {len(audio)} narration segments, "
                                     f"{timeline.total_duration_s:.1f}s")
         return timeline

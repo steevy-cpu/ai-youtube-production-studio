@@ -198,6 +198,9 @@ def test_capability_validation_reports_unsupported_models():
     text = " | ".join(problems)
     assert "DIRECTOR_MODEL 'missing/model' is not in" in text
     assert "VISION_MODEL 'text/llm' does not accept image input" in text
+    assert "THUMBNAIL_MODEL 'anthropic/claude-sonnet-5.5' is not in" in text
+    client, _ = make_client(handler, thumbnail_model="text/llm")
+    assert "THUMBNAIL_MODEL 'text/llm' does not accept image input" in " | ".join(client.capabilities()[1])
     assert "does not support aspect ratio 16:9" in text
     assert "does not support duration 4" in text
     assert "TTS_VOICE 'Kore' is not a voice of 'tts/model' (available: Zephyr, Puck)" in text

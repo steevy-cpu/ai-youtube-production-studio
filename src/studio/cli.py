@@ -35,7 +35,10 @@ def _confirm_live(settings: Settings, project: dict, assume_yes: bool) -> None:
           f"requests)\n"
           f"  LLM / director : {s.llm_model} / {s.director_model}\n"
           f"  vision judge   : {s.vision_model}\n"
-          f"  images         : {s.image_model if s.enable_images else 'DISABLED (placeholders)'}\n"
+          f"  thumbnail      : {s.thumbnail_llm} (prompt + judge) / {s.thumbnail_vision} (reviews) / "
+          f"{s.thumbnail_image if s.enable_images else 'placeholder'} (image)\n"
+          f"  images         : {s.image_model if s.enable_images else 'DISABLED (placeholders)'}"
+          f"{f' (rejected images redrawn by {s.image_retry})' if s.enable_images and s.image_retry != s.image_model else ''}\n"
           f"  narration      : {f'{s.tts_model} voice {s.tts_voice}' if s.enable_tts else 'DISABLED (placeholder tone)'}\n"
           f"  video clips    : {f'{s.video_model} (max {s.max_video_clips})' if s.enable_video else 'disabled'}")
     if assume_yes:
@@ -122,6 +125,12 @@ def cmd_status(args: argparse.Namespace, settings: Settings, store: MemoryStore)
         for e in errors[-5:]:
             print(f"    [{e['task']}/{e['agent']}] {e['message'][:160]}")
     return 0
+
+
+def cmd_watch(args: argparse.Namespace, settings: Settings, store: MemoryStore) -> int:
+    from studio.watch import watch
+    return watch(settings.db_path, args.project, history=args.history, tail=args.tail,
+                 follow=not args.once)
 
 
 def cmd_list(args: argparse.Namespace, settings: Settings, store: MemoryStore) -> int:
@@ -268,6 +277,13 @@ def build_parser() -> argparse.ArgumentParser:
         p = sub.add_parser(name, help=text)
         p.add_argument("project")
         p.set_defaults(func=handler)
+
+    p = sub.add_parser("watch", help="live log: follow what each agent is doing and saying (read-only)")
+    p.add_argument("project", nargs="?", help="default: the production running now, else the latest one")
+    p.add_argument("--history", action="store_true", help="print the whole log from the start first")
+    p.add_argument("--tail", type=int, default=25, help="how many past events to show first (default 25)")
+    p.add_argument("--once", action="store_true", help="print and exit instead of following")
+    p.set_defaults(func=cmd_watch)
 
     sub.add_parser("list", help="list local projects").set_defaults(func=cmd_list)
     sub.add_parser("worker", help="run queued jobs one at a time, then exit (started by the dashboard)"

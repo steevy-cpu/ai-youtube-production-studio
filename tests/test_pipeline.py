@@ -103,6 +103,87 @@ def test_prompt_judge_rejection_revises_only_the_rejected_prompt(project, store)
     assert all(p.status == "approved" for p in store.load_all(project_id, "image_prompt", ImagePrompt).values())
 
 
+class RejectShotOne:
+    """A judge.prompts answer that rejects shot 1 the first `times` times it is judged."""
+
+    def __init__(self, fault: str, times: int):
+        self.fault, self.left = fault, times
+
+    def __call__(self, context):
+        bad = 1 if 1 in context["shot_indexes"] and self.left > 0 else None
+        self.left -= bad is not None
+        return {"verdicts": [dict(REJECT if i == bad else {"approved": True, "score": 0.9}, shot_index=i,
+                                  fault=self.fault if i == bad else "prompt") for i in context["shot_indexes"]]}
+
+
+def judge_rejecting_shot_one(fault: str, times: int) -> dict:
+    return {"judge.prompts": [RejectShotOne(fault, times)] * 50}
+
+
+def test_prompt_judge_sends_an_undrawable_shot_back_to_the_scene_director(project, store):
+    project_id, client, run = project(judge_rejecting_shot_one("scene", 1))
+    assert run() == "completed"
+
+    board = store.load(project_id, "storyboard", Storyboard)
+    first = board.shots[0]
+    assert client.calls.count("scene.visuals") == 1 and "prompt.revise" not in client.calls
+    assert first.visual_description.startswith("[SAMPLE, redrawn]")
+    assert all(not s.visual_description.startswith("[SAMPLE, redrawn]") for s in board.shots[1:])
+    request = [r for r in store.revisions(project_id) if r["target_kind"] == "shot_visual"]
+    assert len(request) == 1 and request[0]["responsible_agent"] == "scene_director"
+    assert request[0]["requested_by"] == "prompt_judge"
+    assert any(d["decision"] == "visuals_rewritten" for d in store.decisions(project_id))
+    # The prompt of that shot was written again from the new picture; nothing else was redone.
+    prompts = store.load_all(project_id, "image_prompt", ImagePrompt)
+    assert "redrawn" in prompts[first.id].prompt and all(p.status == "approved" for p in prompts.values())
+    assert client.calls.count("prompt.scene") == len(board.scenes) + 1
+    assert client.calls.count("scene.chapter") == client.calls.count("writer.chapter")
+    assert client.calls.count("voice.plan") == 1
+    assert len(store.assets(project_id, "audio")) == len(board.scenes)        # no narration re-recorded
+
+
+def test_scene_director_takes_over_when_the_prompt_engineer_runs_out_of_attempts(project, store):
+    project_id, client, run = project(judge_rejecting_shot_one("prompt", 2), max_prompt_attempts=2)
+    assert run() == "completed"                     # before: NEEDS_REVIEW after the second rejection
+    assert client.calls.count("prompt.revise") == 1 and client.calls.count("scene.visuals") == 1
+    tasks = {t["name"]: t for t in store.tasks(project_id)}
+    assert tasks["scene_direction"]["attempts"] == 2 and tasks["prompt_review"]["state"] == "COMPLETED"
+
+
+def test_prompt_loop_still_escalates_when_the_scene_director_has_no_attempt_left(project, store):
+    project_id, client, run = project(judge_rejecting_shot_one("scene", 9), max_storyboard_attempts=1,
+                                      max_prompt_attempts=2)
+    assert run() == "needs_review"
+    assert "scene.visuals" not in client.calls
+    assert states(store, project_id)["prompt_review"] == "NEEDS_REVIEW"
+    assert states(store, project_id)["scene_direction"] == "COMPLETED"
+
+
+def test_resume_after_escalation_revises_the_rejected_prompt_with_the_last_verdict(project, store):
+    project_id, client, run = project(judge_rejecting_shot_one("prompt", 2), max_storyboard_attempts=1,
+                                      max_prompt_attempts=2)
+    assert run() == "needs_review"
+    revised = client.calls.count("prompt.revise")
+    assert run(resume=True, retry_escalated=True) == "completed"
+    assert client.calls.count("prompt.revise") == revised + 1      # not a wasted pass with nothing to do
+
+
+def test_shot_rules_reach_the_scene_director_the_prompt_engineer_and_both_judges(project, store):
+    from studio.agents.prompt_engineer import SHOT_RULES
+    project_id, client, run = project()
+    seen, original = {}, client.chat
+
+    def spy(model, system, user, **kwargs):
+        seen.setdefault(kwargs["task"], []).append((user, kwargs.get("context") or {}))
+        return original(model, system, user, **kwargs)
+    client.chat = spy
+    assert run() == "completed"
+    for task in ("scene.chapter", "prompt.scene", "judge.prompts"):
+        assert SHOT_RULES in seen[task][0][0], task
+    assert "Never show:" in seen["scene.chapter"][0][0]            # the storyboard is written from the Style Bible
+    assert all(SHOT_RULES in user for user, c in seen["judge.image"] if c["purpose"] == "image")
+
+
 def test_visual_judge_rejection_regenerates_only_that_image(project, store):
     seen = []
 
@@ -323,3 +404,203 @@ def test_title_banner_is_drawn_once_inside_the_bottom_band(tmp_path):
     band = b.crop((0, min(changed), 1280, 720)).tobytes()
     white = sum(1 for i in range(0, len(band), 3) if band[i:i + 3] == b"\xff\xff\xff")
     assert white > 2000                                                               # the title is there
+
+
+# ---- regression: the thumbnail prompt loop converges and uses the thumbnail model -------------------
+def test_thumbnail_branch_shares_one_rule_set_and_its_own_model(project, store):
+    from studio.agents.prompt_engineer import THUMBNAIL_RULES
+    project_id, client, run = project(thumbnail_model="strong/vision")
+    seen, original = {}, client.chat
+
+    def spy(model, system, user, **kwargs):
+        seen.setdefault(kwargs["task"], []).append((model, user, kwargs.get("context") or {}))
+        return original(model, system, user, **kwargs)
+    client.chat = spy
+    assert run() == "completed"
+
+    brief = store.load(project_id, "thumbnail_brief", ThumbnailBrief)
+    for task in ("prompt.thumbnail", "judge.thumbnail_prompt"):
+        model, user, _ = seen[task][0]
+        assert model == "strong/vision" and THUMBNAIL_RULES in user
+        assert brief.overlay_text not in user          # the title is never presented as a requirement
+    assert seen["seo.review_thumbnail"][0][0] == "strong/vision"
+    by_purpose = {c["purpose"]: m for m, _, c in seen["judge.image"]}
+    assert by_purpose["thumbnail"] == "strong/vision" and by_purpose["image"] != "strong/vision"
+    assert "Colour palette:" in seen["seo.package"][0][1]                # the brief is written from the Style Bible
+    assert seen["prompt.scene"][0][0] != "strong/vision"                 # the rest of the pipeline is unchanged
+
+
+def test_rejected_thumbnail_image_gets_a_rewritten_prompt_and_its_own_image_model(project, store):
+    def judge(context):
+        if context["purpose"] == "thumbnail" and not getattr(judge, "done", False):
+            judge.done = True
+            return REJECT
+        return {"approved": True, "score": 0.9}
+    project_id, client, run = project({"judge.image": [judge] * 50}, thumbnail_image_model="strong/image",
+                                      image_model="plain/image")
+    models, original = [], client.generate_image
+
+    def spy(model, prompt, **kwargs):
+        models.append((kwargs.get("task"), model))
+        return original(model, prompt, **kwargs)
+    client.generate_image = spy
+    assert run() == "completed"
+    assert [m for task, m in models if task == "thumbnail_generation"] == ["strong/image"] * 2
+    assert {m for task, m in models if task != "thumbnail_generation"} == {"plain/image"}
+    assert client.calls.count("prompt.thumbnail") == 2                 # rewritten after the image rejection
+    assert client.calls.count("judge.thumbnail_prompt") == 1
+    brief = store.load(project_id, "thumbnail_brief", ThumbnailBrief)
+    first, second = store.assets(project_id, "thumbnail", brief.id)
+    assert first.prompt_id != second.prompt_id and second.status == "approved"
+
+
+def test_empty_thumbnail_model_falls_back_to_the_shared_models(settings):
+    cfg = settings.model_copy(update={"thumbnail_model": "", "llm_model": "a/llm", "vision_model": "a/vision"})
+    assert (cfg.thumbnail_llm, cfg.thumbnail_vision) == ("a/llm", "a/vision")
+
+
+# ---- Final QA sends a too-long video back to the Scene Director instead of stopping ----------------
+def test_too_long_video_is_trimmed_by_the_scene_director_and_then_passes(project, store, settings):
+    project_id, client, run = project(target_duration_s=72)
+    # The sample narrator speaks slower than estimated: 72 s planned -> ~108 s rendered.
+    client.settings = client.settings.model_copy(update={"words_per_minute": 100})
+    assert run() == "completed"
+
+    assert client.calls.count("scene.trim") >= 1
+    tasks = {t["name"]: t for t in store.tasks(project_id)}
+    assert tasks["scene_direction"]["attempts"] >= 2 and tasks["final_qa"]["state"] == "COMPLETED"
+    assert any(d["decision"] == "trimmed_for_duration" for d in store.decisions(project_id))
+    assert "duration_trim" in {r["target_kind"] for r in store.revisions(project_id)}
+    low, high = settings.model_copy(update={"target_duration_s": 72}).duration_bounds
+    assert low <= probe(settings.output_dir / project_id / "video.mp4")["duration_s"] <= high
+
+    storyboard = store.load(project_id, "storyboard", Storyboard)
+    from studio.schemas import Script
+    script = store.load(project_id, "script", Script)
+    assert client.calls.count("scene.chapter") == len(script.chapters)       # storyboarded once, then trimmed
+    assert store.recall(project_id, "measured_wpm") == pytest.approx(100, abs=3)
+    for chapter in script.chapters:                       # script and storyboard still agree word for word
+        assert chapter.narration == " ".join(s.narration for s in storyboard.shots
+                                             if s.chapter_index == chapter.index)
+    # Nothing visual was redone: one image per original shot, and unchanged scenes kept their recording.
+    after_trim = client.calls[client.calls.index("scene.trim"):]
+    assert "prompt.scene" not in after_trim and "prompt.revise" not in after_trim and "voice.plan" not in after_trim
+    images = store.assets(project_id, "image")
+    assert len(images) == len({a.parent_id for a in images})
+    audio = store.assets(project_id, "audio")
+    assert len(audio) < 2 * len(storyboard.scenes)
+
+
+# ---- background music library -----------------------------------------------------------------------
+MUSIC_DIR = Path(__file__).resolve().parents[1] / "assets" / "music"
+
+
+def test_every_library_track_has_a_licence_record_and_a_source():
+    tracks = json.loads((MUSIC_DIR / "tracks.json").read_text())["tracks"]
+    assert {t["file"] for t in tracks} == {p.name for p in MUSIC_DIR.glob("*.mp3")} and len(tracks) >= 3
+    for track in tracks:
+        assert track["license"].startswith("CC0") and track["source"].startswith("https://")
+        assert track["author"] and track["moods"]
+        assert probe(MUSIC_DIR / track["file"])["duration_s"] == pytest.approx(track["duration_s"], abs=1)
+
+
+def test_track_choice_follows_the_tone_and_is_stable(tmp_path):
+    from studio.agents.editor import pick_track
+    assert pick_track(MUSIC_DIR, "Warm, cozy and gentle storytelling", "p1")["file"] == "apple_cider.mp3"
+    assert pick_track(MUSIC_DIR, "", "p1") == pick_track(MUSIC_DIR, "", "p1")           # same project, same track
+    assert len({pick_track(MUSIC_DIR, "", f"p{n}")["file"] for n in range(40)}) > 1     # spread over the library
+    assert pick_track(tmp_path, "calm", "p1") is None                                   # no manifest, no music
+    (tmp_path / "a.mp3").write_bytes(b"x")
+    (tmp_path / "tracks.json").write_text(json.dumps({"tracks": [{"file": "a.mp3", "license": ""}]}))
+    assert pick_track(tmp_path, "calm", "p1") is None                                   # no licence, never used
+
+
+def test_library_music_is_mixed_under_the_narration_and_recorded(project, store, settings):
+    project_id, client, run = project(enable_music=True, music_dir=MUSIC_DIR)
+    assert run() == "completed"
+    timeline = store.load(project_id, "timeline", EditingTimeline)
+    assert Path(timeline.music_path).parent == MUSIC_DIR and timeline.music_license.startswith("CC0")
+    (music,) = store.assets(project_id, "music")
+    assert music.license.startswith("CC0") and "opengameart.org" in music.provenance
+    out = settings.output_dir / project_id
+    assert json.loads((out / "metadata.json").read_text())["music"]["license"].startswith("CC0")
+    report = json.loads((out / "compliance_report.json").read_text())
+    assert {i["check"]: i["status"] for i in report["items"]}["music_license"] == "pass"
+    info = probe(out / "video.mp4")
+    assert info["audio"] is not None and abs(info["duration_s"] - timeline.total_duration_s) < 1.5
+
+
+# ---- live log ---------------------------------------------------------------------------------------
+def test_live_log_shows_what_each_agent_said_and_who_was_asked_to_redo_what(project, store, settings):
+    from studio.watch import watch
+    project_id, client, run = project(judge_rejecting_shot_one("scene", 1))
+    assert run() == "completed"
+    lines: list[str] = []
+    assert watch(settings.db_path, project_id, history=True, follow=False, out=lines.append, colour=False) == 0
+    text = "\n".join(lines)
+    assert "Watching " + project_id in text and "completed" in lines[0]
+    assert "Director" in text and "director.plan" in text and "chapters:" in text      # the answer itself
+    assert "Prompt Judge" in text and "REJECTED score" in text
+    assert "asks Scene Director to redo the shot visual" in text
+    assert "FAILED CHECK on prompt" in text and "prompt_review REJECTED" in text
+    assert "validated " not in text and "\033[" not in text
+    # the default project is the most recently active one, and --tail hides older events
+    short: list[str] = []
+    watch(settings.db_path, None, tail=3, follow=False, out=short.append, colour=False)
+    assert project_id in short[0] and "earlier events hidden" in short[1]
+
+
+def test_live_log_follows_new_events_without_touching_the_production(project, store, settings):
+    from studio.watch import watch
+    project_id, client, run = project()
+    lines: list[str] = []
+    ticks = iter([True, True, False])
+
+    def produce_while_watching(_seconds):
+        if not store.tasks(project_id) or all(t["state"] == "PENDING" for t in store.tasks(project_id)):
+            run()
+    before = store.get_project(project_id)["status"]
+    watch(settings.db_path, project_id, out=lines.append, colour=False, sleep=produce_while_watching,
+          keep_going=lambda: next(ticks))
+    text = "\n".join(lines)
+    assert before != "completed" and "Following live" in text
+    assert "export COMPLETED" in text and "production is now COMPLETED" in text
+
+
+def test_rejected_shot_image_is_redrawn_by_the_stronger_model(project, store):
+    rejected = []
+
+    def reject_first_shot_image(context):
+        if context.get("purpose") == "image" and not rejected:
+            rejected.append(True)
+            return REJECT
+        return {"approved": True, "score": 0.9}
+    project_id, client, run = project({"judge.image": [reject_first_shot_image] * 200},
+                                      image_retry_model="strong/image")
+    seen, original = [], client.generate_image
+
+    def spy(model, prompt, **kwargs):
+        seen.append(model)
+        return original(model, prompt, **kwargs)
+    client.generate_image = spy
+    assert run() == "completed"
+    shots = len(store.load(project_id, "storyboard", Storyboard).shots)
+    assert seen.count("strong/image") == 1                        # only the rejected picture
+    assert seen.index("strong/image") >= shots                    # and only after the first pass
+
+
+def test_image_reviewers_share_the_review_rules(project, store):
+    from studio.agents.prompt_engineer import IMAGE_REVIEW_RULES
+    project_id, client, run = project()
+    seen, original = [], client.chat
+
+    def spy(model, system, user, **kwargs):
+        if kwargs["task"] == "judge.image":
+            seen.append((kwargs["context"]["purpose"], user))
+        return original(model, system, user, **kwargs)
+    client.chat = spy
+    assert run() == "completed"
+    assert {p for p, _ in seen} >= {"image", "thumbnail"} and all(IMAGE_REVIEW_RULES in u for _, u in seen)
+    thumbnail = next(u for p, u in seen if p == "thumbnail")
+    brief = store.load(project_id, "thumbnail_brief", ThumbnailBrief)
+    assert brief.concept in thumbnail and "is not a defect" in thumbnail

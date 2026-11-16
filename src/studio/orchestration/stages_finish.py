@@ -10,7 +10,8 @@ from studio.agents.director import Director
 from studio.agents.editor import Editor
 from studio.agents.final_qa import FinalQA
 from studio.agents.judges import PromptJudge
-from studio.agents.prompt_engineer import PromptEngineer
+from studio.agents.prompt_engineer import THUMBNAIL_RULES, PromptEngineer
+from studio.agents.scene_director import allowed_removals, numbered_sentences
 from studio.agents.seo import SEO
 from studio.agents.visual_generation import VisualGeneration, thumbnail_size
 from studio.guards import image_guard, prompt_guard
@@ -18,14 +19,14 @@ from studio.memory import APPROVED
 from studio.orchestration.context import Ctx
 from studio.orchestration.engine import Escalation, Rejection
 from studio.orchestration.outputs import publish_work_files
-from studio.orchestration.stages_content import from_evaluation, need, revision
+from studio.orchestration.stages_content import DURATION_TRIM, from_evaluation, need, revision
 from studio.orchestration.stages_media import aspect, judge_image, set_status
 from studio.rendering.ffmpeg import probe
 from studio.rendering.renderer import render
 from studio.schemas import (ComplianceReport, EditingTimeline, ImagePrompt, MediaAsset, NarrationSegment,
                             ProductionPlan, ProductionReport, ProjectBrief, ResearchBrief, RevisionRequest,
                             Script, SEOPackage, Storyboard, StyleBible, ThumbnailBrief)
-from studio.utils import now_iso
+from studio.utils import now_iso, word_count
 
 FINAL_EVALUATORS = ("final_video_guard", "final_av_check", "final_qa_continuity")
 
@@ -54,10 +55,15 @@ def editing(ctx: Ctx, feedback: list[RevisionRequest]) -> str:
         narration[scene.id] = asset
     timeline = Editor(ctx).build_timeline(storyboard, visuals, narration)
     ctx.store.save_artifact(ctx.project_id, "timeline", timeline)
-    if timeline.music_path and not ctx.store.assets(ctx.project_id, "music"):
+    known = {a.path for a in ctx.store.assets(ctx.project_id, "music")}
+    if timeline.music_path and timeline.music_path not in known:
+        library = bool(timeline.music_title)
         ctx.store.add_asset(MediaAsset(
             project_id=ctx.project_id, kind="music", path=timeline.music_path, status="approved",
-            provenance="user-supplied file (MUSIC_PATH)", license=s.music_license))
+            provenance=(f"music library track '{timeline.music_title}', source {timeline.music_source}"
+                        if library else "user-supplied file (MUSIC_PATH)"),
+            license=timeline.music_license, metadata={"title": timeline.music_title,
+                                                      "source": timeline.music_source}))
     for note in timeline.notes:
         ctx.store.add_limitation(ctx.project_id, note)
     return f"timeline: {len(timeline.clips)} clips, {timeline.total_duration_s:.1f}s"
@@ -79,12 +85,51 @@ def rendering(ctx: Ctx, feedback: list[RevisionRequest]) -> str:
     return f"rendered {out.name}: {info['duration_s']:.1f}s (unapproved copy in {preview.name}/preliminary)"
 
 
+DURATION_CHECK = "duration within accepted range"
+MAX_TRIM_SHARE = 0.4        # beyond this the script itself is wrong; a human decides
+
+
+def duration_rework(ctx: Ctx, guard, timeline: EditingTimeline, storyboard: Storyboard
+                    ) -> RevisionRequest | None:
+    """The request Final QA sends to the Scene Director when the ONLY problem is a video that is too
+    long, or None when that route does not apply (another check failed, the video is too short, the
+    cut would be too deep, or the Scene Director has no attempt left) and a human has to decide."""
+    failed = [c.name for c in guard.criteria if not c.passed]
+    duration = guard.metrics.get("duration_s") or 0.0
+    low, high = ctx.settings.duration_bounds
+    if failed != [DURATION_CHECK] or duration <= high:
+        return None
+    task = ctx.store.get_task(ctx.project_id, "scene_direction")
+    if task["attempts"] >= task["max_attempts"]:
+        return None
+    words = sum(word_count(scene.narration) for scene in storyboard.scenes)
+    speech = sum(a.audio_s for a in timeline.audio)
+    if not words or not speech:
+        return None
+    aim = min(max(ctx.settings.target_duration_s, low), high)         # the target, not the edge of the range
+    words_to_cut = round((duration - aim) * words / speech)
+    if words_to_cut < 1 or words_to_cut > words * MAX_TRIM_SHARE:
+        return None
+    rows = numbered_sentences(storyboard)          # is a cut of that size possible at all?
+    removable = allowed_removals(rows, [r["n"] for r in rows], ctx.settings)
+    if sum(r["words"] for r in rows if r["n"] in removable) < words_to_cut * 0.8:
+        return None
+    return revision(storyboard.id, DURATION_TRIM, "scene_direction", "scene_director", "final_qa",
+                    [f"the rendered video lasts {duration:.1f}s; the accepted range is {low:.0f}-{high:.0f}s. "
+                     f"The narrator needs {speech / words:.2f}s per word, so about {words_to_cut} of the "
+                     f"{words} narration words have to go to reach about {aim:.0f}s"],
+                    [str(words_to_cut), str(round(words / speech * 60))])
+
+
 def final_qa(ctx: Ctx, feedback: list[RevisionRequest]) -> str:
     timeline, storyboard = need(ctx, "timeline", EditingTimeline), need(ctx, "storyboard", Storyboard)
     video = ctx.store.latest_asset(ctx.project_id, "final_video", timeline.id)
     results = FinalQA(ctx).review(Path(video.path), timeline, storyboard, need(ctx, "script", Script))
     guard = results[0]
     if not guard.passed:
+        request = duration_rework(ctx, guard, timeline, storyboard)
+        if request is not None:
+            raise Rejection("scene_direction", [request], "Final QA: " + "; ".join(guard.issues))
         raise Escalation("Final Video Guard failed: " + "; ".join(guard.issues)
                          + (" | suggested: " + "; ".join(guard.suggested_changes) if guard.suggested_changes
                             else ""))
@@ -125,7 +170,7 @@ def director_final_approval(ctx: Ctx, feedback: list[RevisionRequest]) -> str:
 def seo_package(ctx: Ctx, feedback: list[RevisionRequest]) -> str:
     brief, style = need(ctx, "brief", ProjectBrief), need(ctx, "style_bible", StyleBible)
     result = SEO(ctx).package(need(ctx, "script", Script), need(ctx, "plan", ProductionPlan),
-                              brief.topic, style.art_style)
+                              brief.topic, style)
     result.seo.status = result.thumbnail_brief.status = "ready"
     seo = ctx.store.save_artifact(ctx.project_id, "seo", result.seo)
     result.thumbnail_brief.parent_id = seo.id
@@ -175,7 +220,20 @@ def thumbnail_generation(ctx: Ctx, feedback: list[RevisionRequest]) -> str:
     if latest and latest.status in APPROVED + ("generated", "reviewed") and not feedback:
         return "thumbnail candidate already waiting for review"
     notes = "; ".join(i for r in feedback for i in r.issues + r.suggested_changes)
-    asset = VisualGeneration(ctx).thumbnail(need(ctx, "thumbnail_prompt", ImagePrompt), brief, style, notes)
+    if not notes and latest and latest.status == "rejected":
+        # Resumed after the attempts ran out: the task's feedback is gone, but the last candidate's
+        # failed reviews are still in memory, so the retry starts from them, not from scratch.
+        notes = "; ".join(i for e in ctx.store.evaluations(ctx.project_id, target_id=latest.id)
+                          if not e.passed for i in e.issues + e.suggested_changes)
+    prompt = need(ctx, "thumbnail_prompt", ImagePrompt)
+    if notes:
+        # Reviewers rejected the picture. Repeating the same prompt with corrections appended rarely
+        # fixes a composition problem, so the Prompt Engineer rewrites the prompt from the review
+        # first; the reviewers then judge the new candidate against that rewritten prompt.
+        prompt = PromptEngineer(ctx).thumbnail_prompt(brief, style, notes)
+        prompt.status = "approved"
+        ctx.store.save_artifact(ctx.project_id, "thumbnail_prompt", prompt)
+    asset = VisualGeneration(ctx).thumbnail(prompt, brief, style, notes)
     candidates = len(ctx.store.assets(ctx.project_id, "thumbnail", brief.id))
     return f"thumbnail candidate {candidates} generated ({Path(asset.path).name})"
 
@@ -200,9 +258,17 @@ def thumbnail_review(ctx: Ctx, feedback: list[RevisionRequest]) -> str:
         raw = asset.model_copy(update={"path": asset.metadata.get("raw_path") or asset.path})
         results.append(judge_image(
             ctx, raw, prompt, style, "thumbnail", ctx.settings.thumbnail_threshold,
-            "This is YouTube thumbnail artwork before software adds the title banner. It must not "
-            "contain any title, caption, headline or label text: such text is a serious error. A small "
-            "mark that is part of a character's design in the Style Bible is acceptable."))
+            "This is YouTube thumbnail artwork before software adds the title banner.\n"
+            f"What the thumbnail has to communicate (the SEO brief): {brief.concept} Main subject: "
+            f"{brief.main_subject} Emotion: {brief.emotion}.\n"
+            "Judge whether the picture delivers THAT, with one clear focal subject that still reads at "
+            "about 160 pixels wide. The prompt above is only how the picture was asked for: a pose, "
+            "prop, perspective or framing that came out differently from the prompt is not a defect "
+            "when the idea still reads. Serious for a thumbnail, besides the review rules below: any "
+            "title, caption, headline or label text in the artwork (a small mark that is part of a "
+            "character's Style Bible design is acceptable), and a face inside the bottom sixth of the "
+            "frame, which the banner will cover. Props, furniture, legs or floor in that bottom sixth "
+            "are fine.\n" + THUMBNAIL_RULES))
     failed = [r for r in results if not r.passed]
     if failed:
         set_status(ctx, asset, "rejected")
@@ -263,6 +329,9 @@ def export(ctx: Ctx, feedback: list[RevisionRequest]) -> str:
                 "retention_suggestions": seo.retention_suggestions, "seo_disclaimer": seo.disclaimer,
                 "synthetic_media_disclosure": report.synthetic_media_disclosure,
                 "thumbnail": "thumbnail.png", "video": "video.mp4", "language": brief.language,
+                "music": ({"title": timeline.music_title or Path(timeline.music_path).name,
+                           "license": timeline.music_license, "source": timeline.music_source}
+                          if timeline.music_path else None),
                 "duration_s": video.duration_s, "resolution": f"{video.width}x{video.height}",
                 "mode": brief.mode, "sample_notice": notice, "generated_at": now_iso(),
                 "published": False}

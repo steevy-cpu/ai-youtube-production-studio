@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from studio.agents.judges import PromptJudge, VisualJudge
-from studio.agents.prompt_engineer import PromptEngineer, reference_prompt
+from studio.agents.prompt_engineer import SHOT_RULES, PromptEngineer, reference_prompt
 from studio.agents.visual_generation import VisualGeneration
 from studio.agents.voice_director import VoiceDirector
 from studio.evaluation.audio_qa import check_narration
@@ -16,7 +16,8 @@ from studio.guards import image_guard, prompt_guard, video_clip_guard
 from studio.memory import APPROVED
 from studio.orchestration.context import Ctx
 from studio.orchestration.engine import Rejection
-from studio.orchestration.stages_content import feedback_for, from_evaluation, need, revision
+from studio.orchestration.stages_content import (SHOT_VISUAL, STALE, feedback_for, from_evaluation, need,
+                                                 revision)
 from studio.schemas import (AnimationPrompt, EvaluationResult, ImagePrompt, MediaAsset, NarrationSegment,
                             ProductionPlan, RevisionRequest, Storyboard, StyleBible)
 from studio.services.openrouter import OpenRouterError
@@ -89,7 +90,9 @@ def prompt_engineering(ctx: Ctx, feedback: list[RevisionRequest]) -> str:
     existing = ctx.store.load_all(ctx.project_id, "image_prompt", ImagePrompt)
     engineer, created, revised = PromptEngineer(ctx), 0, 0
     for scene in storyboard.scenes:
-        missing = [shot for shot in scene.shots if shot.id not in existing]
+        # No prompt yet, or the Scene Director gave the shot a new picture: write it from scratch.
+        missing = [shot for shot in scene.shots
+                   if shot.id not in existing or existing[shot.id].status == STALE]
         if missing:
             for shot_id, (image, animation) in engineer.scene_prompts(scene, missing, style).items():
                 ctx.store.save_artifact(ctx.project_id, "image_prompt", image, key=shot_id)
@@ -97,9 +100,19 @@ def prompt_engineering(ctx: Ctx, feedback: list[RevisionRequest]) -> str:
                     ctx.store.save_artifact(ctx.project_id, "animation_prompt", animation, key=shot_id)
                 created += 1
     for shot in storyboard.shots:
+        current = existing.get(shot.id)
+        if current is None or current.status == STALE:
+            continue
         notes = feedback_for(feedback, shot.id)
-        if notes and shot.id in existing:
-            prompt = engineer.revise(shot, existing[shot.id], style, notes)
+        if not notes and current.status == "rejected":
+            # Rejected, but the request did not arrive as feedback (a resume after an escalation, or
+            # the review sent other shots to the Scene Director first): use the judge's last verdict.
+            failed = [e for e in ctx.store.evaluations(ctx.project_id, target_id=current.id) if not e.passed]
+            if failed:
+                notes = from_evaluation(failed[-1], shot.id, "prompt", "prompt_engineering",
+                                        "prompt_engineer").as_feedback()
+        if notes:
+            prompt = engineer.revise(shot, current, style, notes)
             ctx.store.save_artifact(ctx.project_id, "image_prompt", prompt, key=shot.id)
             revised += 1
     return f"{created} prompt(s) written, {revised} revised after feedback"
@@ -110,11 +123,14 @@ def prompt_review(ctx: Ctx, feedback: list[RevisionRequest]) -> str:
     prompts = ctx.store.load_all(ctx.project_id, "image_prompt", ImagePrompt)
     shot_ids = {shot.id for shot in storyboard.shots}
     judge, requests, approved = PromptJudge(ctx), [], 0
+    judged: list[tuple] = []          # (shot, failed Prompt Judge evaluation)
 
     def reject(shot, prompt, evaluation):
         prompt.status = "rejected"
         ctx.store.update_artifact(prompt)
         requests.append(from_evaluation(evaluation, shot.id, "prompt", "prompt_engineering", "prompt_engineer"))
+        if evaluation.evaluator == judge.name:
+            judged.append((shot, evaluation))
 
     for scene in storyboard.scenes:
         to_judge = []
@@ -152,8 +168,40 @@ def prompt_review(ctx: Ctx, feedback: list[RevisionRequest]) -> str:
                 ctx.store.add_limitation(ctx.project_id, f"Animation prompt for shot {shot_id} failed the "
                                                          "Prompt Guard; that shot stays a still image.")
     if requests:
+        to_scene = scene_requests(ctx, judged)
+        if to_scene:
+            raise Rejection("scene_direction", to_scene,
+                            f"{len(to_scene)} shot(s) need a different picture ({len(requests)} prompt(s) rejected)")
         raise Rejection("prompt_engineering", requests, f"{len(requests)} prompt(s) rejected")
     return f"{approved} prompt(s) approved this pass; all {len(shot_ids)} shots have approved prompts"
+
+
+def scene_requests(ctx: Ctx, judged: list[tuple]) -> list[RevisionRequest]:
+    """Requests the Prompt Judge sends to the Scene Director instead of the Prompt Engineer.
+
+    A shot goes back to the Scene Director when the judge names the required visual itself as the
+    problem, or when the Prompt Engineer has no attempt left and the prompt is still rejected (another
+    rewrite of the same picture would not help, and the alternative is to stop for a human). Empty
+    when the Scene Director has no attempt left: the normal route and its escalation then apply.
+    """
+    director = ctx.store.get_task(ctx.project_id, "scene_direction")
+    if director["attempts"] >= director["max_attempts"]:
+        return []
+    engineer = ctx.store.get_task(ctx.project_id, "prompt_engineering")
+    exhausted = engineer["attempts"] >= engineer["max_attempts"]
+    requests = []
+    for shot, evaluation in judged:
+        if evaluation.metrics.get("fault") == "scene":
+            why = "the Prompt Judge found that the required visual itself cannot be drawn under the rules"
+        elif exhausted:
+            why = (f"the Prompt Engineer rewrote the prompt {engineer['attempts']} time(s) and the Prompt "
+                   "Judge still rejects it")
+        else:
+            continue
+        requests.append(revision(shot.id, SHOT_VISUAL, "scene_direction", "scene_director", PromptJudge.name,
+                                 [why] + evaluation.issues, evaluation.suggested_changes))
+    return requests
+
 
 
 # ---- images ------------------------------------------------------------------------------
@@ -165,7 +213,16 @@ def visual_generation(ctx: Ctx, feedback: list[RevisionRequest]) -> str:
         latest = ctx.store.latest_asset(ctx.project_id, "image", shot.id)
         if latest and latest.status in APPROVED + ("generated",):
             continue                           # approved, or generated and still waiting for review
-        generator.shot_image(shot, prompts[shot.id], style, feedback_for(feedback, shot.id))
+        notes = feedback_for(feedback, shot.id)
+        if not notes and latest and latest.status == "rejected":
+            # Resumed after the attempts ran out: start from the last review, not from nothing.
+            notes = "\n".join(f"- problem: {i}" for e in ctx.store.evaluations(ctx.project_id, target_id=latest.id)
+                              if not e.passed for i in e.issues)
+        # A rejected picture is redrawn by the stronger model: asking the same model again with a
+        # correction note fixed only about a third of the rejected images per pass in live runs.
+        retry = bool(latest and latest.status == "rejected")
+        generator.shot_image(shot, prompts[shot.id], style, notes,
+                             model=ctx.settings.image_retry if retry else None)
         made += 1
     return f"{made} image(s) generated; {len(storyboard.shots) - made} kept from earlier passes"
 
@@ -188,7 +245,9 @@ def visual_review(ctx: Ctx, feedback: list[RevisionRequest]) -> str:
         if result.passed:
             verdict = judge_image(ctx, asset, prompts[shot.id], style, "image",
                                   ctx.settings.visual_judge_threshold,
-                                  f"The image must illustrate: {shot.visual_description}")
+                                  f"The image must illustrate: {shot.visual_description}\n\n{SHOT_RULES}\n"
+                                  "Judge the image under those rules: a wordless stand-in for text, "
+                                  "digits or symbols is correct, and missing writing is never a defect.")
             result = verdict or result
         if result.passed:
             set_status(ctx, asset, "approved")
@@ -244,6 +303,21 @@ def voice_direction(ctx: Ctx, feedback: list[RevisionRequest]) -> str:
     existing = ctx.store.load_all(ctx.project_id, "narration", NarrationSegment)
     if all(scene.id in existing and existing[scene.id].text == scene.narration for scene in storyboard.scenes):
         return f"{len(storyboard.scenes)} narration segments already planned"
+    planned = [existing[scene.id] for scene in storyboard.scenes if scene.id in existing]
+    if planned and len(planned) == len(storyboard.scenes):
+        # Same scenes, some with shortened narration (Final QA duration trim): keep the voice plan and
+        # every unchanged recording; only the changed scenes get a new segment and are re-recorded.
+        changed = 0
+        for scene in storyboard.scenes:
+            old = existing[scene.id]
+            if old.text != scene.narration:
+                ctx.store.save_artifact(ctx.project_id, "narration", NarrationSegment(
+                    parent_id=scene.id, index=scene.index, text=scene.narration, voice=old.voice,
+                    speed=old.speed, instructions=old.instructions, status="approved",
+                    estimated_s=round(max(len(scene.narration.split()), 1) / ctx.settings.words_per_minute
+                                      * 60 / old.speed, 2)), key=scene.id)
+                changed += 1
+        return f"{changed} narration segment(s) updated, {len(planned) - changed} kept with their recording"
     voice_plan, segments = VoiceDirector(ctx).plan(storyboard, plan)
     for segment in segments:
         segment.status = "approved"

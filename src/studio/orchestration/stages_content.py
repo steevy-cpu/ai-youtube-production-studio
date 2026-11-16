@@ -12,14 +12,14 @@ from pydantic import BaseModel
 
 from studio.agents.director import Director
 from studio.agents.research import Research
-from studio.agents.scene_director import SceneDirector, retime
+from studio.agents.scene_director import SceneDirector, numbered_sentences, retime
 from studio.agents.story_writer import StoryWriter
 from studio.guards import chapter_word_targets, chapters_off_target, script_guard, timeline_guard
 from studio.orchestration.context import Ctx
 from studio.orchestration.engine import Escalation, Rejection
-from studio.schemas import (Chapter, EvaluationResult, ProductionPlan, ProjectBrief, ResearchBrief,
-                            RevisionRequest, Script, Storyboard, StyleBible)
-from studio.utils import split_sentences
+from studio.schemas import (Chapter, EvaluationResult, ImagePrompt, ProductionPlan, ProjectBrief,
+                            ResearchBrief, RevisionRequest, Script, Storyboard, StyleBible)
+from studio.utils import split_sentences, word_count
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -149,7 +149,101 @@ def director_script_approval(ctx: Ctx, feedback: list[RevisionRequest]) -> str:
 
 
 # ---- storyboard ---------------------------------------------------------------------------
+DURATION_TRIM = "duration_trim"      # target_kind of the request Final QA sends when the video is too long
+
+
+def trim_for_duration(ctx: Ctx, request: RevisionRequest) -> str:
+    """Final QA found the video too long: the Scene Director drops whole sentences.
+
+    Shots keep their ids, so their approved images are reused; only scenes whose narration changed
+    are re-recorded. The script is updated to the trimmed wording so every later check agrees.
+    """
+    script, storyboard = need(ctx, "script", Script), need(ctx, "storyboard", Storyboard)
+    words_to_cut, measured_wpm = (int(x) for x in request.suggested_changes[:2])
+    # From here on durations are estimated with the narrator's MEASURED pace, not the configured guess
+    # that made the script too long; otherwise the Timeline Guard would call the fixed storyboard short.
+    measured_wpm = min(max(measured_wpm, 60), 260)
+    ctx.store.remember(ctx.project_id, "measured_wpm", measured_wpm)
+    ctx.settings = ctx.settings.model_copy(update={"words_per_minute": measured_wpm})
+    rows = numbered_sentences(storyboard)
+    removed = SceneDirector(ctx).trim(storyboard, words_to_cut, "; ".join(request.issues))
+    if not removed:
+        raise Escalation("Final QA asked for a shorter video, but the Scene Director found no sentence "
+                         "that can be removed safely. " + "; ".join(request.issues))
+    kept = {}
+    for row in rows:
+        if row["n"] not in removed:
+            kept.setdefault(row["shot"], []).append(row["text"])
+    scenes = []
+    for scene in storyboard.scenes:
+        scene.shots = [shot for shot in scene.shots if shot.id in kept]
+        for shot in scene.shots:
+            shot.narration = " ".join(kept[shot.id])
+        if scene.shots:
+            scenes.append(scene)
+    trimmed = retime(Storyboard(parent_id=script.id, scenes=scenes), ctx.settings)
+    ctx.store.save_artifact(ctx.project_id, "storyboard", trimmed)
+
+    stored = ctx.store.load_all(ctx.project_id, "chapter", Chapter)
+    for chapter in script.chapters:
+        chapter.narration = " ".join(s.narration for s in trimmed.shots if s.chapter_index == chapter.index)
+        if str(chapter.index) in stored:
+            stored[str(chapter.index)].narration = chapter.narration
+            ctx.store.update_artifact(stored[str(chapter.index)])
+    ctx.store.update_artifact(script)
+    cut = sum(r["words"] for r in rows if r["n"] in removed)
+    detail = (f"removed {len(removed)} sentence(s), {cut} words (asked for about {words_to_cut}); "
+              f"{len(storyboard.shots) - len(trimmed.shots)} shot(s) dropped, no wording changed")
+    ctx.store.add_decision(ctx.project_id, "scene_director", "storyboard", "trimmed_for_duration", detail)
+    ctx.store.add_limitation(ctx.project_id, "The narration was shortened after rendering because the video "
+                                             f"was too long: {detail}.")
+    return f"storyboard v{trimmed.version} trimmed for duration: {detail}"
+
+
+SHOT_VISUAL = "shot_visual"          # target_kind of the request the Prompt Judge sends for an undrawable shot
+STALE = "stale"                      # status of an image prompt whose shot got a new visual description
+
+
+def rewrite_visuals(ctx: Ctx, requests: list[RevisionRequest]) -> str:
+    """The Prompt Judge sent shots back: the Scene Director describes a different picture for them.
+
+    Narration, timing and ids are untouched, so the voice branch keeps every recording. The old image
+    prompts of those shots are marked stale and the Prompt Engineer writes them again from scratch.
+    """
+    script, storyboard = need(ctx, "script", Script), need(ctx, "storyboard", Storyboard)
+    style, agent = need(ctx, "style_bible", StyleBible), SceneDirector(ctx)
+    wanted = {r.parent_id for r in requests}
+    prompts = ctx.store.load_all(ctx.project_id, "image_prompt", ImagePrompt)
+    changed = []
+    for scene in storyboard.scenes:
+        rejected = [(shot, feedback_for(requests, shot.id)) for shot in scene.shots if shot.id in wanted]
+        if not rejected:
+            continue
+        visuals = agent.revise_visuals(scene, rejected, style)
+        for shot, _ in rejected:
+            if shot.id in visuals:
+                shot.visual_description = visuals[shot.id]
+                changed.append(shot.index)
+                if shot.id in prompts:
+                    prompts[shot.id].status = STALE
+                    ctx.store.update_artifact(prompts[shot.id])
+    if not changed:
+        raise Escalation("The Prompt Judge asked for different pictures, but the Scene Director returned "
+                         "no new visual description for any of the shots.")
+    revised = Storyboard(parent_id=script.id, scenes=storyboard.scenes)
+    ctx.store.save_artifact(ctx.project_id, "storyboard", revised)
+    detail = (f"new visual description for shot(s) {', '.join(str(i) for i in sorted(changed))} at the "
+              "Prompt Judge's request; narration and timing unchanged")
+    ctx.store.add_decision(ctx.project_id, "scene_director", "storyboard", "visuals_rewritten", detail)
+    return f"storyboard v{revised.version}: {detail}"
+
+
 def scene_direction(ctx: Ctx, feedback: list[RevisionRequest]) -> str:
+    for request in feedback:
+        if request.target_kind == DURATION_TRIM:
+            return trim_for_duration(ctx, request)
+    if any(r.target_kind == SHOT_VISUAL for r in feedback):
+        return rewrite_visuals(ctx, [r for r in feedback if r.target_kind == SHOT_VISUAL])
     script, style = need(ctx, "script", Script), need(ctx, "style_bible", StyleBible)
     previous = ctx.store.load(ctx.project_id, "storyboard", Storyboard)
     chapter_ids = {c.id for c in script.chapters}

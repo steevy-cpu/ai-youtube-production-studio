@@ -38,8 +38,14 @@ class ImageService:
         self.ctx = ctx
 
     def generate(self, prompt_text: str, *, kind: str, parent_id: str, prompt_id: str | None, name: str,
-                 agent: str, label: str = "", references: list[Path] | None = None) -> MediaAsset:
+                 agent: str, label: str = "", references: list[Path] | None = None,
+                 model: str | None = None) -> MediaAsset:
         ctx, s = self.ctx, self.ctx.settings
+        image_model = model or s.image_model
+        refs_ok = ctx.caps.get("image_references")
+        if image_model != s.image_model:          # a separate (thumbnail / retry) model has its own capability
+            refs_ok = ctx.caps.get("references_by_model", {}).get(
+                image_model, ctx.caps.get("thumbnail_image_references", refs_ok))
         path = _next_path(ctx, DIR_FOR_KIND[kind], name, parent_id, kind, ".png")
         metadata: dict = {"prompt": prompt_text}
 
@@ -47,12 +53,12 @@ class ImageService:
             raw, model = sample_image(label or prompt_text[:120]), ""
             provenance, is_sample = "local placeholder (ENABLE_IMAGES=false; no AI model used)", True
         else:
-            use_refs = [p for p in (references or []) if p.is_file()] if ctx.caps.get("image_references") else []
+            use_refs = [p for p in (references or []) if p.is_file()] if refs_ok else []
             use_refs = use_refs[:ctx.caps.get("image_reference_max", 1)]
             if references and not use_refs:
                 metadata["limitation"] = "reference images not passed to the model (unsupported or disabled)"
             ctx.budget.check("image")
-            result = ctx.client.generate_image(s.image_model, prompt_text, aspect_ratio=s.aspect_ratio,
+            result = ctx.client.generate_image(image_model, prompt_text, aspect_ratio=s.aspect_ratio,
                                                references=use_refs or None, task=ctx.task,
                                                context={"label": label or prompt_text[:120]})
             ctx.budget.record(ctx.task, agent, "image", result.usage)

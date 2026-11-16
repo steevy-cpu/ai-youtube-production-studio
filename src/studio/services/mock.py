@@ -174,11 +174,30 @@ class MockOpenRouterClient:
                               "framing": "medium shot", "media_type": "image",
                               "camera_move": ["zoom_in", "pan_right", "zoom_out", "pan_left"][len(shots) % 4]})
                 start, words = number + 1, 0
+        if len(shots) > 1:         # a trailing fragment of a few words would be shorter than the minimum shot
+            tail = sum(c["sentence_words"][shots[-1]["first_sentence"] - 1:shots[-1]["last_sentence"]])
+            if tail * 60 / c["words_per_minute"] < 2:
+                last = shots.pop()
+                shots[-1]["last_sentence"] = last["last_sentence"]
         if shots and c.get("allow_animation"):
             shots[0]["media_type"] = "animation"
         scenes = [{"title": f"{c['title']} - part {n // 3 + 1}", "summary": "Sample scene.",
                    "shots": shots[n:n + 3]} for n in range(0, len(shots), 3)]
         return {"scenes": scenes}
+
+    def _scene_visuals(self, c: dict) -> dict:
+        return {"visuals": [{"shot_index": shot["index"],
+                             "visual_description": f"[SAMPLE, redrawn] {shot['visual_description']}"}
+                            for shot in c["shots"]]}
+
+    def _scene_trim(self, c: dict) -> dict:
+        remove, cut = [], 0
+        for number, words in c["candidates"]:
+            if cut >= c["words_to_cut"]:
+                break
+            remove.append(number)
+            cut += words
+        return {"remove": remove, "reason": "Dry-run sample trim."}
 
     def _prompt_scene(self, c: dict) -> dict:
         return {"prompts": [{

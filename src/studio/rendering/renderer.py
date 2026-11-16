@@ -126,7 +126,9 @@ def render(timeline: EditingTimeline, work_dir: Path, out_path: Path, font_path:
     args = ["-i", str(video), "-i", str(narration)]
     if timeline.music_path:
         args += ["-stream_loop", "-1", "-i", timeline.music_path, "-filter_complex",
-                 f"[2:a]volume={timeline.music_volume}[m];"
+                 # quiet bed under the voice, faded in and out so it never starts or stops abruptly
+                 f"[2:a]volume={timeline.music_volume},afade=t=in:d=1.5,"
+                 f"afade=t=out:st={max(timeline.total_duration_s - 3, 0):.3f}:d=3[m];"
                  "[1:a][m]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]",
                  "-map", "0:v", "-map", "[a]"]
     else:

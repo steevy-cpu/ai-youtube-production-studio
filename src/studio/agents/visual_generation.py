@@ -63,13 +63,15 @@ class VisualGeneration(Agent):
                 if a.id in style.reference_asset_ids]
         return [Path(a.path) for a in refs]
 
-    def shot_image(self, shot: Shot, prompt: ImagePrompt, style: StyleBible, feedback: str = "") -> MediaAsset:
+    def shot_image(self, shot: Shot, prompt: ImagePrompt, style: StyleBible, feedback: str = "",
+                   model: str | None = None) -> MediaAsset:
         asset = self.images.generate(
             compose_image_prompt(prompt, style, feedback), kind="image", parent_id=shot.id,
             prompt_id=prompt.id, name=f"shot_{shot.index:03d}", agent=self.name,
-            label=f"Shot {shot.index}: {shot.visual_description}", references=self._references(style))
+            label=f"Shot {shot.index}: {shot.visual_description}", references=self._references(style),
+            model=model)
         self.note("generate_image", f"shot {shot.index} -> {Path(asset.path).name}"
-                                    f"{' (regeneration with feedback)' if feedback else ''}")
+                                    f"{f' (regeneration with feedback, {asset.model})' if feedback else ''}")
         return asset
 
     def reference_image(self, prompt: ImagePrompt, style: StyleBible, name: str, feedback: str = "") -> MediaAsset:
@@ -85,7 +87,8 @@ class VisualGeneration(Agent):
         asset = self.images.generate(
             compose_image_prompt(prompt, style, feedback), kind="thumbnail", parent_id=brief.id,
             prompt_id=prompt.id, name="thumbnail_candidate", agent=self.name,
-            label=f"Thumbnail: {brief.concept}", references=self._references(style))
+            label=f"Thumbnail: {brief.concept}", references=self._references(style),
+            model=self.ctx.settings.thumbnail_image)
         size = thumbnail_size(self.ctx.settings.aspect_ratio)
         raw = Path(asset.path)
         raw_copy = raw.with_name(raw.stem + "_raw.png")

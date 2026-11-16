@@ -25,7 +25,8 @@ def settings(tmp_path):
     return Settings(
         data_dir=tmp_path / "data", output_dir=tmp_path / "output", references_dir=tmp_path / "refs",
         target_duration_s=24, min_chapters=1, max_chapters=2, target_shot_seconds=6,
-        dry_run_width=320, dry_run_height=180, dry_run_fps=10, dry_run_demo_rejections=False)
+        dry_run_width=320, dry_run_height=180, dry_run_fps=10, dry_run_demo_rejections=False,
+        enable_music=False)          # the music library has its own tests
 
 
 @pytest.fixture

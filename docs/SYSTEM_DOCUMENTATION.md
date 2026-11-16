@@ -133,14 +133,14 @@ Source layout:
 | B | Research | `agents/research.py` | yes | `LLM_MODEL` |
 | C | Story Writer | `agents/story_writer.py` | yes | `LLM_MODEL` |
 | D | Scene Director | `agents/scene_director.py` | yes | `LLM_MODEL` |
-| E | Prompt Engineer | `agents/prompt_engineer.py` | yes | `LLM_MODEL` |
-| F | Prompt Judge | `agents/judges.py` | yes | `LLM_MODEL` |
+| E | Prompt Engineer | `agents/prompt_engineer.py` | yes | `LLM_MODEL` (`THUMBNAIL_MODEL` for the thumbnail prompt) |
+| F | Prompt Judge | `agents/judges.py` | yes | `LLM_MODEL` (`THUMBNAIL_MODEL` for the thumbnail prompt) |
 | G | Visual Generation | `agents/visual_generation.py` | image / video models | `IMAGE_MODEL`, `VIDEO_MODEL` |
-| H | Visual Judge | `agents/judges.py` | yes (vision) | `VISION_MODEL` |
+| H | Visual Judge | `agents/judges.py` | yes (vision) | `VISION_MODEL` (`THUMBNAIL_MODEL` for thumbnails) |
 | I | Voice Director (+ Audio QA) | `agents/voice_director.py`, `evaluation/audio_qa.py` | yes + speech model | `LLM_MODEL`, `TTS_MODEL` |
 | J | Editor | `agents/editor.py` | no (deterministic rules) | - |
 | K | Final QA | `agents/final_qa.py` | deterministic + one LLM review | `LLM_MODEL` |
-| L | SEO & Growth | `agents/seo.py` | yes (+ vision for review) | `LLM_MODEL`, `VISION_MODEL` |
+| L | SEO & Growth | `agents/seo.py` | yes (+ vision for review) | `LLM_MODEL`, `THUMBNAIL_MODEL` (thumbnail review) |
 | M | Compliance | `agents/compliance.py` | deterministic + LLM screening | `LLM_MODEL` |
 
 Several agents share one LLM by default; each role can be pointed at a different model.
@@ -176,8 +176,9 @@ from judge feedback; converts the SEO thumbnail brief into a thumbnail prompt. T
 sent to the image model is assembled by `compose_image_prompt` (prompt + composition +
 lighting + character descriptions + style + exclusions + corrections).
 
-**Prompt Judge.** Compares each prompt with its shot (required details, character and style
-rules, contradictions, no requested text or brands) and returns a scored verdict per shot.
+**Prompt Judge.** Compares each prompt with its shot under the shared `SHOT_RULES` and returns
+a scored verdict per shot, with a `fault` field naming who must fix a rejection: the Prompt
+Engineer (`prompt`) or the Scene Director (`scene`, the required picture itself cannot be drawn).
 Also checks the thumbnail prompt against the SEO brief.
 
 **Visual Generation.** Calls the image service for shots, character references and thumbnail
@@ -398,6 +399,7 @@ the guard.
 | Script | Script Guard, Director | Story Writer | Only the chapters named in the feedback | `MAX_SCRIPT_ATTEMPTS` |
 | Storyboard | Timeline Guard | Scene Director | Only the faulty chapters (other scenes keep their ids and assets) | `MAX_STORYBOARD_ATTEMPTS` |
 | Prompts | Prompt Guard, Prompt Judge | Prompt Engineer | Only rejected prompts | `MAX_PROMPT_ATTEMPTS` |
+| Shot visuals | Prompt Judge | Scene Director | Only the visual description of the shots sent back (narration, timing and recordings kept) | `MAX_STORYBOARD_ATTEMPTS` |
 | Images | Media Guard, Visual Judge | Visual Generation | Only rejected images, with corrections appended to the prompt | `MAX_VISUAL_ATTEMPTS` |
 | Narration | Audio QA | Voice Director / TTS | Only rejected segments | `MAX_AUDIO_ATTEMPTS` |
 | Thumbnail prompt | Prompt Guard, Prompt Judge | Prompt Engineer | The thumbnail prompt | `MAX_PROMPT_ATTEMPTS` |
@@ -507,6 +509,83 @@ padded with silence to its slot and concatenated, (4) optional music mix, (5) mu
 (AAC audio, `+faststart`) and write `captions.srt`. Captions are drawn with Pillow because
 many FFmpeg builds lack the `subtitles`/`drawtext` filters.
 
+## Prompt Judge route to the Scene Director
+
+A live run stopped for human review after nine review passes on the same few shots. The Scene
+Director had asked for pictures the Style Bible forbids (a button labelled with a word, a
+percentage, dollar signs, red bars outside the palette, a costume over the fixed outfit). The
+Prompt Engineer could satisfy the shot or the Style Bible, never both, and the Prompt Judge
+rejected each choice in turn. Three changes remove that loop:
+
+- **One rule set, `SHOT_RULES`** (`agents/prompt_engineer.py`), shown word for word to the Scene
+  Director, the Prompt Engineer, the Prompt Judge and the Visual Judge for shot images. It settles
+  outfit, palette (one signal accent colour is allowed), writing (always replaced by a wordless
+  stand-in, which is never a "missing detail"), the fact that software appends character
+  descriptions, and one moment per shot. The Scene Director now also receives the Style Bible, so
+  it stops requesting forbidden pictures in the first place.
+- **The Prompt Judge can reach the Scene Director.** `prompt_review` raises a `Rejection` towards
+  `scene_direction` (request kind `shot_visual`) for a shot when the judge sets `fault: scene`, or
+  when the Prompt Engineer has used all its attempts and the prompt is still rejected.
+  `rewrite_visuals` then has the Scene Director describe a different picture for those shots
+  only. Narration, timing and ids are unchanged, so no audio is re-recorded; the old prompt is
+  marked `stale` and written again from scratch, and the Prompt Engineer gets fresh attempts.
+  The route is bounded by `MAX_STORYBOARD_ATTEMPTS` (shared with the Final QA trim); when the
+  Scene Director has no attempt left the loop escalates to a human as before.
+- **Resume uses the last verdict.** A rejected prompt whose request did not arrive as task
+  feedback (resume after an escalation) is revised with the judge's last failed evaluation instead
+  of being re-judged unchanged.
+
+## Image review rules, stronger-model redraws and the live log
+
+**What the logs showed.** In one run 57 of 100 shot images were rejected, most of them for "five
+fingers instead of four" (a Style Bible detail no image model controls), and the run stopped with
+13 shots unapproved. In the next run the SEO agent approved all three thumbnail candidates (0.88
+each) but the Visual Judge rejected them for prompt details such as an open laptop or a room that
+was not isometric; every rewrite added constraints and the score fell from 0.60 to 0.35.
+
+- **`IMAGE_REVIEW_RULES`** (`agents/prompt_engineer.py`) are part of every Visual Judge call. The
+  prompt is a means, not a checklist. Rejection is reserved for what a viewer notices at a glance
+  (wrong subject, off-model character, wrong art style, readable writing, glaring defects);
+  finger counts, exact angles, prop details and shades are notes.
+- **Thumbnail review** judges the picture against the SEO brief (concept, main subject, emotion)
+  instead of the literal prompt. The Prompt Engineer keeps thumbnail prompts under about 120 words
+  and answers a rejection by simplifying the picture, not by adding constraints.
+- **`IMAGE_RETRY_MODEL`** (default `google/gemini-3-pro-image`): a shot image the Visual Judge
+  rejected is redrawn by this stronger model; first pictures still come from `IMAGE_MODEL`. A
+  resume after an escalation also starts from the last review of each rejected picture.
+- **The Director** no longer puts uncontrollable requirements (such as a number of fingers) into
+  the Style Bible.
+
+**Live log.** `python run.py watch [project-id]` (module `studio/watch.py`) follows a production
+from a second terminal. It is read-only: it polls the SQLite memory and prints task state changes,
+every model call with a digest of the agent's answer (stored in `agent_runs.detail`), failed
+checks with their issues, revision requests (who asks whom to redo what), decisions and errors.
+Without a project id it follows the production running now, otherwise the latest one. `--history`
+prints the whole log first, `--tail N` the last N events, `--once` prints and exits.
+
+## Final QA duration rework and background music
+
+**Too-long video.** When the Final Video Guard fails only because the rendered video is longer
+than the accepted range, `final_qa` no longer stops for a human. It measures the narrator's real
+pace (seconds per word), works out how many words must go to reach the target, and raises a
+rejection towards `scene_direction` (`target_kind` `duration_trim`). The Scene Director picks
+whole sentences to remove (`scene.trim`); code refuses to drop a chapter's first or last
+sentence, more than half of a chapter, or anything that would leave a shot under the minimum
+length. Wording is never changed, shots keep their ids so approved images are reused, the script
+is updated to the trimmed wording, unchanged scenes keep their recording, and the measured pace
+replaces `WORDS_PER_MINUTE` for the rest of the project (`measured_wpm` in project memory). The
+engine then re-runs narration for the changed scenes, editing, rendering and Final QA. The loop is
+bounded by `MAX_STORYBOARD_ATTEMPTS`. Final QA still escalates to a human when another check
+failed, the video is too short, more than 40% of the words would have to go, or no cut of the
+required size is possible. The Prompt Engineer is not involved: a trim creates no new shot.
+
+**Background music.** `assets/music/` holds CC0 tracks with a manifest (`tracks.json`: title,
+author, licence, source, mood tags). With `ENABLE_MUSIC=true` the Editor chooses the track whose
+mood tags best match the Director's tone (ties broken by a hash of the project id), the renderer
+loops it under the narration at `MUSIC_VOLUME` with a fade in and out, and the track's licence and
+source are stored on the music asset, in `metadata.json` and in the compliance report.
+`MUSIC_PATH` + `MUSIC_LICENSE` still force one specific file.
+
 ## 20. SEO and thumbnail generation
 
 After the Director approves the video, the SEO agent produces the `SEOPackage` and the
@@ -531,6 +610,22 @@ produced doubled title text):
 - The Director is told that notes attached to passing reviews are minor. A Director rejection
   concerns the concept, so it goes to the Prompt Engineer (new prompt, re-judged) rather than
   straight to the image step; the judges therefore always check against the current prompt.
+- One shared rule block (`THUMBNAIL_RULES` in `agents/prompt_engineer.py`) is shown word for word
+  to the Prompt Engineer and the Prompt Judge: the Style Bible decides style, palette and
+  characters; the brief decides concept, subject, composition and emotion; the artwork never
+  contains text. It was added after a live run in which the brief named colours outside the
+  Style Bible palette and the judge alternately demanded both palettes, and the overlay text
+  both added and removed, until the attempts ran out before any image was generated.
+- The SEO agent now receives the Style Bible and must pick the brief's colours from its palette
+  and propose one large focal subject rather than a sequence or chart.
+- The thumbnail prompt, its judge and both image reviews run on `THUMBNAIL_MODEL` (a stronger
+  text+vision model; empty falls back to `LLM_MODEL` / `VISION_MODEL`).
+- When the image reviewers reject a candidate, `thumbnail_generation` first has the Prompt
+  Engineer rewrite the prompt from their feedback (a new stored prompt version) and only then
+  generates the next candidate. Re-sending the same prompt with corrections appended kept
+  producing the same four-panel layout in a live run.
+- The thumbnail image comes from `THUMBNAIL_IMAGE_MODEL` (empty falls back to `IMAGE_MODEL`), and
+  every request demands one full-frame scene: no panels, borders, margins or text-like glyphs.
 - New Style Bibles do not put lettering or logos on characters. Stored for every production: the brief, each prompt
 version, every candidate, every evaluation and the approved thumbnail, exported as
 `thumbnail.png`.

@@ -38,7 +38,16 @@ class Settings(BaseModel):
     llm_model: str = "google/gemini-3-flash-preview"
     director_model: str = "google/gemini-3-flash-preview"
     vision_model: str = "google/gemini-3-flash-preview"
+    # Stronger text+vision model for the thumbnail branch only (prompt, prompt judge, both image
+    # reviews): a handful of calls per video. Empty = use LLM_MODEL / VISION_MODEL there too.
+    thumbnail_model: str = "anthropic/claude-sonnet-5.5"
+    # Stronger image model for the thumbnail only (at most MAX_THUMBNAIL_ATTEMPTS images per video).
+    # Empty = use IMAGE_MODEL.
+    thumbnail_image_model: str = "google/gemini-3-pro-image"
     image_model: str = "google/gemini-2.5-flash-image"
+    # Stronger image model used only to redraw a shot image the Visual Judge rejected (the first
+    # picture of every shot still comes from IMAGE_MODEL). Empty = redraw with IMAGE_MODEL.
+    image_retry_model: str = "google/gemini-3-pro-image"
     video_model: str = "google/veo-3.1"
     tts_model: str = "google/gemini-3.8-flash-lite-tts"
     stt_model: str = ""
@@ -79,7 +88,10 @@ class Settings(BaseModel):
     tts_instructions: Switch = "auto"
     tts_pcm_sample_rate: int = 24000
 
-    # Licensed music
+    # Background music. By default the Editor picks a track from MUSIC_DIR (see its tracks.json);
+    # MUSIC_PATH + MUSIC_LICENSE force one specific file instead.
+    enable_music: bool = True
+    music_dir: Path = Path("assets/music")
     music_path: str = ""
     music_license: str = ""
     music_volume: float = Field(default=0.12, ge=0, le=1)
@@ -152,6 +164,22 @@ class Settings(BaseModel):
     @property
     def db_path(self) -> Path:
         return self.data_dir / "studio.db"
+
+    @property
+    def thumbnail_llm(self) -> str:
+        return self.thumbnail_model or self.llm_model
+
+    @property
+    def thumbnail_vision(self) -> str:
+        return self.thumbnail_model or self.vision_model
+
+    @property
+    def thumbnail_image(self) -> str:
+        return self.thumbnail_image_model or self.image_model
+
+    @property
+    def image_retry(self) -> str:
+        return self.image_retry_model or self.image_model
 
     @property
     def target_words(self) -> int:

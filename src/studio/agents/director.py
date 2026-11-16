@@ -54,7 +54,10 @@ class Director(Agent):
             "clothing precise enough to redraw them identically), art style, colour palette, environment "
             "and camera framing guidelines, and a negative prompt listing what must never appear. "
             "Character designs must not include lettering, numbers or logos (image models render them "
-            "inconsistently).")
+            "inconsistently). Define a character by what is recognisable at a glance (hair, face, "
+            "build, outfit and its colours). Never require something an image model cannot control or "
+            "a viewer would not notice, such as a number of fingers, and keep the negative prompt to "
+            "things visible at a glance.")
         if feedback:
             user += f"\n\nYour previous plan was rejected:\n{feedback}"
         result = self.ask("director.plan", DirectorPlan, self.system, user, context={
