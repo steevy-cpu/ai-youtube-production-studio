@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<style>
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: #0b1020;
+  color: #eef2ff;
+  font-family: system-ui, sans-serif;
+}
+
+.studio {
+  padding: 24px;
+  border: 1px solid #28324a;
+  border-radius: 20px;
+  background:
+    radial-gradient(ellipse at 70% 0, #163343 0, transparent 55%),
+    #0b1020;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+}
+
+.eyebrow {
+  font-size: 10px;
+  letter-spacing: 2px;
+  color: #6ee7d1;
+  font-weight: 700;
+}
+
+h2 {
+  font-size: 28px;
+  letter-spacing: -1px;
+  margin: 8px 0;
+}
+
+p {
+  color: #9aaac4;
+  font-size: 13px;
+  margin: 0;
+}
+
+.controls { display: flex; gap: 8px; }
+button { font: inherit; }
+
+.control {
+  background: #1c2940;
+  color: #e8f1ff;
+  border: 1px solid #354760;
+  border-radius: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  margin: 18px 0;
+  font-size: 11px;
+  color: #b9c7dd;
+}
+
+.legend span::before {
+  content: "●";
+  color: var(--c);
+  margin-right: 6px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.agent {
+  --color: #7185a4;
+  position: relative;
+  text-align: left;
+  color: #e8efff;
+  background: linear-gradient(145deg, #1c2840, #10182a);
+  border: 1px solid #2e3c53;
+  border-radius: 12px;
+  padding: 12px 10px;
+  cursor: pointer;
+  min-width: 0;
+  transition: border-color .2s, background .2s;
+}
+
+.agent:hover,
+.agent:focus-visible,
+.agent.selected {
+  border-color: var(--color);
+  outline: 2px solid var(--color);
+  outline-offset: 1px;
+}
+
+.agent.working,
+.agent.retrying {
+  --color: #5eead4;
+  background: linear-gradient(145deg, #153b40, #10202e);
+}
+
+.agent.done { --color: #99b5ff; }
+.agent.blocked { --color: #ffbf70; }
+.agent.paused { --color: #c4a6ff; }
+
+.card-top,
+.card-bottom {
+  display: flex;
+  justify-content: space-between;
+  gap: 4px;
+  font-size: 10px;
+  color: #91a4bd;
+}
+
+.status {
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--color);
+  font-size: 9px;
+}
+
+.number { font-variant-numeric: tabular-nums; }
+
+.agent strong {
+  display: block;
+  font-size: 12px;
+  margin-top: 8px;
+  min-height: 30px;
+}
+
+.task {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  color: #a4b4cb;
+  margin: 4px 0 12px;
+}
+
+.card-bottom {
+  border-top: 1px solid #ffffff10;
+  padding-top: 8px;
+}
+
+/* Robot and workstation shapes. */
+.scene {
+  height: 126px;
+  position: relative;
+  perspective: 600px;
+  overflow: hidden;
+}
+
+.platform {
+  position: absolute;
+  width: 100px;
+  height: 66px;
+  left: 50%;
+  bottom: 0;
+  transform: translateX(-50%) rotateX(58deg) rotateZ(-18deg);
+  background: #263650;
+  border: 1px solid #4b5f7b;
+  box-shadow: 0 8px 0 #111d32;
+  border-radius: 12px;
+}
+
+.robot {
+  position: absolute;
+  width: 54px;
+  height: 95px;
+  left: calc(50% - 30px);
+  top: 13px;
+  transform: rotateY(-18deg) rotateX(5deg);
+  transform-style: preserve-3d;
+  filter: drop-shadow(6px 7px 3px #0005);
+}
+
+.head {
+  position: absolute;
+  width: 44px;
+  height: 32px;
+  left: 5px;
+  top: 8px;
+  border-radius: 12px;
+  background: linear-gradient(130deg, #e0e9f7, #8b9db8 70%);
+  box-shadow: 5px 2px 0 #536680, inset 1px 2px 2px #fff;
+}
+
+.visor {
+  position: absolute;
+  inset: 8px 5px;
+  background: #0b1626;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: space-evenly;
+}
+
+.visor i {
+  background: var(--color);
+  height: 5px;
+  width: 6px;
+  border-radius: 3px;
+  box-shadow: 0 0 7px var(--color);
+}
+
+.antenna {
+  position: absolute;
+  top: 0;
+  left: 26px;
+  height: 10px;
+  width: 3px;
+  background: #6e829f;
+}
+
+.antenna::before {
+  content: "";
+  position: absolute;
+  top: -3px;
+  left: -2px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color);
+}
+
+.body {
+  position: absolute;
+  left: 10px;
+  top: 45px;
+  width: 35px;
+  height: 29px;
+  background: linear-gradient(110deg, #c5d2e5, #657d9e);
+  box-shadow: 4px 1px 0 #455972;
+  border-radius: 7px;
+}
+
+.body span {
+  position: absolute;
+  inset: 8px 10px;
+  border: 2px solid var(--color);
+  border-radius: 50%;
+  box-shadow: 0 0 8px var(--color);
+}
+
+.arm {
+  position: absolute;
+  top: 46px;
+  width: 10px;
+  height: 30px;
+  background: linear-gradient(90deg, #c7d4e7, #7086a2);
+  border-radius: 6px;
+  transform-origin: top;
+}
+
+.arm.left { left: -2px; transform: rotate(15deg); }
+.arm.right { right: -3px; transform: rotate(-25deg); }
+
+.leg {
+  position: absolute;
+  top: 75px;
+  width: 12px;
+  height: 19px;
+  background: linear-gradient(90deg, #a8bbd5, #617692);
+  border-radius: 3px 3px 5px 5px;
+}
+
+.leg.left { left: 10px; }
+.leg.right { right: 8px; }
+
+.desk {
+  position: absolute;
+  left: calc(50% + 9px);
+  top: 62px;
+  transform: rotateY(-22deg);
+}
+
+.screen {
+  width: 35px;
+  height: 29px;
+  border: 3px solid #6a809f;
+  background: #0b1b2c;
+  box-shadow: 3px 3px 0 #263a54;
+  border-radius: 4px;
+  padding: 4px;
+}
+
+.screen b {
+  display: block;
+  height: 2px;
+  margin: 2px 0;
+  background: var(--color);
+  opacity: .7;
+}
+
+.screen b:nth-child(2) { width: 65%; }
+
+.keyboard {
+  height: 9px;
+  width: 39px;
+  background: repeating-linear-gradient(
+    90deg, #4c617b 0 3px, #21354f 3px 5px
+  );
+  transform: skewX(-30deg);
+  margin-top: 3px;
+}
+
+/* Only agents with active work animate. */
+.working .robot,
+.retrying .robot {
+  animation: bob 1.4s ease-in-out infinite;
+  animation-delay: var(--delay);
+}
+
+.working .arm,
+.retrying .arm {
+  animation: type .45s ease-in-out infinite alternate;
+}
+
+.working .arm.right,
+.retrying .arm.right {
+  animation-delay: -.2s;
+}
+
+.working .screen b,
+.retrying .screen b {
+  animation: code 1s infinite alternate;
+}
+
+.blocked .visor i { height: 3px; width: 8px; }
+.done .body span { background: var(--color); }
+
+@keyframes bob {
+  50% { translate: 0 -4px; }
+}
+
+@keyframes type {
+  to { transform: rotate(-55deg); }
+}
+
+@keyframes code {
+  to { opacity: .2; transform: scaleX(.5); }
+}
+
+.paused-motion * {
+  animation-play-state: paused !important;
+}
+
+#detail {
+  margin-top: 16px;
+  background: #101c30;
+  border: 1px solid #2c405b;
+  padding: 14px 16px;
+  border-radius: 10px;
+  min-height: 76px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+#detail strong { color: #6ee7d1; }
+#detail p { font-size: 12px; overflow-wrap: anywhere; }
+
+.footer {
+  margin-top: 12px;
+  font-size: 10px;
+  color: #8b9bb5;
+}
+
+@media (max-width: 1000px) {
+  .grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+}
+
+@media (max-width: 650px) {
+  .grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .header { display: block; }
+  .controls { margin-top: 12px; }
+  .studio { padding: 14px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; }
+}
+</style>
+</head>
+
+<body>
+<main class="studio">
+  <div class="header">
+    <div>
+      <div class="eyebrow">__MODE__</div>
+      <h2>The production floor</h2>
+      <p>13 specialists. One story coming to life.</p>
+    </div>
+    <div class="controls">
+      <button class="control" id="motion" aria-pressed="false">
+        Pause motion
+      </button>
+      <button class="control" id="replay" hidden>Replay demo</button>
+    </div>
+  </div>
+
+  <div class="legend">
+    <span style="--c:#5eead4">Working / retrying</span>
+    <span style="--c:#99b5ff">Done</span>
+    <span style="--c:#ffbf70">Needs attention</span>
+    <span style="--c:#7185a4">Waiting</span>
+    <span style="--c:#c4a6ff">Paused</span>
+  </div>
+
+  <div class="grid">__CARDS__</div>
+
+  <div id="detail" aria-live="polite">
+    <strong>Meet your crew</strong>
+    <p>Select an agent to see its task and latest recorded result.</p>
+  </div>
+
+  <div class="footer">
+    CSS 3D characters · No external assets ·
+    Task counts reflect assigned work, not time remaining. __MODE__
+  </div>
+</main>
+
+<script>
+const demo = __DEMO__;
+const cards = [...document.querySelectorAll(".agent")];
+const detail = document.querySelector("#detail");
+
+let paused = false;
+let step = 0;
+let selected = null;
+
+// Display recorded details safely as text.
+function inspect(card) {
+  selected = card;
+
+  cards.forEach(c => {
+    c.classList.toggle("selected", c === card);
+  });
+
+  detail.replaceChildren();
+
+  const title = document.createElement("strong");
+  const text = document.createElement("p");
+
+  title.textContent = card.dataset.name + " · " + card.dataset.state;
+  text.textContent = card.dataset.task + " — " + card.dataset.result;
+
+  detail.append(title, text);
+}
+
+cards.forEach(card => {
+  card.addEventListener("click", () => inspect(card));
+});
+
+document.querySelector("#motion").onclick = function () {
+  paused = !paused;
+  document.body.classList.toggle("paused-motion", paused);
+  this.textContent = paused ? "Resume motion" : "Pause motion";
+  this.setAttribute("aria-pressed", String(paused));
+};
+
+// Demo activity is simulated locally; it makes no API requests.
+function frame() {
+  cards.forEach((card, i) => {
+    const state =
+      step === cards.length ? "done" :
+      i < step ? "done" :
+      i === step ? "working" : "waiting";
+
+    card.classList.remove(
+      "working", "done", "waiting", "blocked", "paused", "retrying"
+    );
+    card.classList.add(state);
+    card.dataset.state = state;
+    card.querySelector(".status").textContent = state;
+
+    card.dataset.task =
+      state === "working" ? "Simulated task in progress" :
+      state === "done" ? "Simulated task complete" :
+      "Waiting in demo sequence";
+
+    card.dataset.result =
+      "Presentation animation only. No production or API request is running.";
+
+    card.querySelector(".task").textContent = card.dataset.task;
+
+    card.querySelector(".card-bottom span:last-child").textContent =
+      state === "done" ? "1/1" : "0/1";
+  });
+
+  if (selected) inspect(selected);
+}
+
+if (demo) {
+  document.querySelector("#replay").hidden = false;
+  frame();
+
+  setInterval(() => {
+    if (!paused && step < cards.length) {
+      step++;
+      frame();
+    }
+  }, 2200);
+
+  document.querySelector("#replay").onclick = () => {
+    step = 0;
+    frame();
+  };
+}
+</script>
+</body>
+</html>
